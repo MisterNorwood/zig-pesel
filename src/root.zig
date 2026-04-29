@@ -28,7 +28,7 @@ fn daysToDate(days_since_1970: usize) [3]u32 {
 }
 
 fn processChunk(buffer_slice: []u8, global_start_idx: usize) void {
-    const count = buffer_slice.len / 11;
+    const count = buffer_slice.len / 12;
 
     const weights = [_]u32{ 1, 3, 7, 9, 1, 3, 7, 9, 1, 3 };
     var v_weights: [10]Vec = undefined;
@@ -81,18 +81,19 @@ fn processChunk(buffer_slice: []u8, global_start_idx: usize) void {
 
         inline for (0..8) |lane| {
             if (i + lane >= count) break;
-            const offset = (i + lane) * 11;
+            const offset = (i + lane) * 12;
             inline for (0..10) |d| {
                 buffer_slice[offset + d] = @as(u8, @intCast(digits[d][lane])) + '0';
             }
             buffer_slice[offset + 10] = @as(u8, @intCast(checksum[lane])) + '0';
+            buffer_slice[offset + 11] = '\n';
         }
     }
 }
 
 pub fn generatePesels(allocator: std.mem.Allocator) ![]u8 {
-    const total_count = 40_000_000;
-    const buffer = try allocator.alloc(u8, total_count * 11);
+    const total_count = 400_000_000;
+    const buffer = try allocator.alloc(u8, total_count * 12);
 
     const cpu_count = try std.Thread.getCpuCount();
     const chunk_size = total_count / cpu_count;
@@ -104,8 +105,8 @@ pub fn generatePesels(allocator: std.mem.Allocator) ![]u8 {
         const start_idx = t * chunk_size;
         const end_idx = if (t == cpu_count - 1) total_count else start_idx + chunk_size;
 
-        const slice_start = start_idx * 11;
-        const slice_end = end_idx * 11;
+        const slice_start = start_idx * 12;
+        const slice_end = end_idx * 12;
 
         threads[t] = try std.Thread.spawn(.{}, processChunk, .{ buffer[slice_start..slice_end], start_idx });
     }
