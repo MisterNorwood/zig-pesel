@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const Vec = @Vector(8, u32);
+const Vec = @Vector(16, u32);
 
 fn daysToDate(days_since_1970: usize) [3]u32 {
     var days = @as(u32, @intCast(days_since_1970));
