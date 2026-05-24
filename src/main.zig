@@ -2,21 +2,25 @@ const std = @import("std");
 const root = @import("root.zig");
 
 pub fn main() !void {
-    var gpa = std.heap.smp_allocator;
+    const gpa = std.heap.smp_allocator;
     var threadedIO: std.Io.Threaded = .init(gpa, .{});
     defer threadedIO.deinit();
     const io = threadedIO.io();
 
-    std.debug.print("Generating PESELs...\n", .{});
-    const buffer = try root.generatePesels(gpa);
-    defer gpa.free(buffer);
+    const generated = try root.ensureRandomPeselFile(
+        std.Io.Dir.cwd(),
+        io,
+        gpa,
+        root.default_pesel_path,
+        root.default_pesel_count,
+    );
 
-    var file = try std.Io.Dir.cwd().createFile(io, "pesel.txt", .{});
-    defer file.close(io);
-
-    const data = root.generatePesels(gpa) catch "ERROR";
-    std.debug.print("Generated {} bytes. Writing to 'pesel.txt' file...\n", .{buffer.len});
-    _ = try file.writeStreamingAll(io, data);
-
-    std.debug.print("Done.\n", .{});
+    if (generated) {
+        std.debug.print(
+            "Generated {} random PESELs and wrote them to '{s}'.\n",
+            .{ root.default_pesel_count, root.default_pesel_path },
+        );
+    } else {
+        std.debug.print("'{s}' already exists. Skipping generation.\n", .{root.default_pesel_path});
+    }
 }
