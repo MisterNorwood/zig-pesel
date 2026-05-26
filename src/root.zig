@@ -23,6 +23,25 @@ const total_birth_days: u32 = blk: {
     break :blk total;
 };
 
+const TreeCodecError = error{
+    InvalidFormat,
+    UnexpectedEof,
+};
+
+pub const TreeKind = enum {
+    avl,
+    red_black,
+    two_three_four,
+};
+
+pub fn serializedTreeKind(bytes: []const u8) TreeCodecError!TreeKind {
+    if (bytes.len < 4) return TreeCodecError.UnexpectedEof;
+    if (std.mem.eql(u8, bytes[0..4], "AVL1")) return .avl;
+    if (std.mem.eql(u8, bytes[0..4], "RBT1")) return .red_black;
+    if (std.mem.eql(u8, bytes[0..4], "2341")) return .two_three_four;
+    return TreeCodecError.InvalidFormat;
+}
+
 fn isLeapYear(year: u32) bool {
     return (year % 4 == 0 and year % 100 != 0) or (year % 400 == 0);
 }
@@ -420,6 +439,60 @@ pub const AvlTree = struct {
         return result.inserted;
     }
 
+    pub fn remove(self: *AvlTree, key: u64) !bool {
+        var keys: std.ArrayList(u64) = .empty;
+        defer keys.deinit(self.allocator);
+
+        var removed = false;
+        try collectKeysExcept(self.root, key, &keys, self.allocator, &removed);
+        if (!removed) return false;
+
+        var rebuilt = AvlTree.init(self.allocator);
+        errdefer rebuilt.deinit();
+        for (keys.items) |existing_key| {
+            _ = try rebuilt.insert(existing_key);
+        }
+
+        destroyNode(self.allocator, self.root);
+        self.* = rebuilt;
+        return true;
+    }
+
+    pub fn writeIndented(self: *const AvlTree, writer: anytype) !void {
+        if (self.root == null) {
+            try writer.writeAll("(empty)\n");
+            return;
+        }
+        try writeNodeIndented(writer, self.root, 0, "root");
+    }
+
+    pub fn serialize(self: *const AvlTree, allocator: std.mem.Allocator) ![]u8 {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+
+        try bytes.appendSlice(allocator, "AVL1");
+        try serializeNode(&bytes, allocator, self.root);
+        return bytes.toOwnedSlice(allocator);
+    }
+
+    pub fn deserialize(allocator: std.mem.Allocator, bytes: []const u8) !AvlTree {
+        if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "AVL1")) {
+            return TreeCodecError.InvalidFormat;
+        }
+
+        var cursor: usize = 4;
+        const root = try deserializeNode(allocator, bytes, &cursor);
+        errdefer destroyNode(allocator, root);
+
+        if (cursor != bytes.len) return TreeCodecError.InvalidFormat;
+
+        return .{
+            .allocator = allocator,
+            .root = root,
+            .len = countNodes(root),
+        };
+    }
+
     fn insertNode(allocator: std.mem.Allocator, maybe_node: ?*Node, key: u64) !InsertResult {
         if (maybe_node == null) {
             const node = try allocator.create(Node);
@@ -451,6 +524,28 @@ pub const AvlTree = struct {
             destroyNode(allocator, node.right);
             allocator.destroy(node);
         }
+    }
+
+    fn countNodes(maybe_node: ?*Node) usize {
+        const node = maybe_node orelse return 0;
+        return 1 + countNodes(node.left) + countNodes(node.right);
+    }
+
+    fn collectKeysExcept(
+        maybe_node: ?*Node,
+        key: u64,
+        keys: *std.ArrayList(u64),
+        allocator: std.mem.Allocator,
+        removed: *bool,
+    ) !void {
+        const node = maybe_node orelse return;
+        try collectKeysExcept(node.left, key, keys, allocator, removed);
+        if (!removed.* and node.key == key) {
+            removed.* = true;
+        } else {
+            try keys.append(allocator, node.key);
+        }
+        try collectKeysExcept(node.right, key, keys, allocator, removed);
     }
 
     fn height(maybe_node: ?*Node) i32 {
@@ -502,6 +597,54 @@ pub const AvlTree = struct {
         }
 
         return node;
+    }
+
+    fn serializeNode(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, maybe_node: ?*Node) !void {
+        if (maybe_node == null) {
+            try writeByte(bytes, allocator, 0);
+            return;
+        }
+
+        const node = maybe_node.?;
+        try writeByte(bytes, allocator, 1);
+        try writeU64(bytes, allocator, node.key);
+        try serializeNode(bytes, allocator, node.left);
+        try serializeNode(bytes, allocator, node.right);
+    }
+
+    fn deserializeNode(allocator: std.mem.Allocator, bytes: []const u8, cursor: *usize) !?*Node {
+        const tag = try readByte(bytes, cursor);
+        switch (tag) {
+            0 => return null,
+            1 => {},
+            else => return TreeCodecError.InvalidFormat,
+        }
+
+        const node = try allocator.create(Node);
+        errdefer allocator.destroy(node);
+
+        node.* = .{ .key = try readU64(bytes, cursor) };
+        node.left = try deserializeNode(allocator, bytes, cursor);
+        errdefer destroyNode(allocator, node.left);
+
+        node.right = try deserializeNode(allocator, bytes, cursor);
+        errdefer destroyNode(allocator, node.right);
+
+        updateHeight(node);
+        return node;
+    }
+
+    fn writeNodeIndented(writer: anytype, maybe_node: ?*Node, depth: usize, label: []const u8) !void {
+        for (0..depth) |_| try writer.writeAll("  ");
+        if (maybe_node == null) {
+            try writer.print("{s}: null\n", .{label});
+            return;
+        }
+
+        const node = maybe_node.?;
+        try writer.print("{s}: key={} height={}\n", .{ label, node.key, node.height });
+        try writeNodeIndented(writer, node.left, depth + 1, "L");
+        try writeNodeIndented(writer, node.right, depth + 1, "R");
     }
 };
 
@@ -555,6 +698,60 @@ pub const RedBlackTree = struct {
         return result.inserted;
     }
 
+    pub fn remove(self: *RedBlackTree, key: u64) !bool {
+        var keys: std.ArrayList(u64) = .empty;
+        defer keys.deinit(self.allocator);
+
+        var removed = false;
+        try collectKeysExcept(self.root, key, &keys, self.allocator, &removed);
+        if (!removed) return false;
+
+        var rebuilt = RedBlackTree.init(self.allocator);
+        errdefer rebuilt.deinit();
+        for (keys.items) |existing_key| {
+            _ = try rebuilt.insert(existing_key);
+        }
+
+        destroyNode(self.allocator, self.root);
+        self.* = rebuilt;
+        return true;
+    }
+
+    pub fn writeIndented(self: *const RedBlackTree, writer: anytype) !void {
+        if (self.root == null) {
+            try writer.writeAll("(empty)\n");
+            return;
+        }
+        try writeNodeIndented(writer, self.root, 0, "root");
+    }
+
+    pub fn serialize(self: *const RedBlackTree, allocator: std.mem.Allocator) ![]u8 {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+
+        try bytes.appendSlice(allocator, "RBT1");
+        try serializeNode(&bytes, allocator, self.root);
+        return bytes.toOwnedSlice(allocator);
+    }
+
+    pub fn deserialize(allocator: std.mem.Allocator, bytes: []const u8) !RedBlackTree {
+        if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "RBT1")) {
+            return TreeCodecError.InvalidFormat;
+        }
+
+        var cursor: usize = 4;
+        const root = try deserializeNode(allocator, bytes, &cursor);
+        errdefer destroyNode(allocator, root);
+
+        if (cursor != bytes.len) return TreeCodecError.InvalidFormat;
+
+        return .{
+            .allocator = allocator,
+            .root = root,
+            .len = countNodes(root),
+        };
+    }
+
     fn insertNode(allocator: std.mem.Allocator, maybe_node: ?*Node, key: u64) !InsertResult {
         if (maybe_node == null) {
             const node = try allocator.create(Node);
@@ -586,6 +783,28 @@ pub const RedBlackTree = struct {
             destroyNode(allocator, node.right);
             allocator.destroy(node);
         }
+    }
+
+    fn countNodes(maybe_node: ?*Node) usize {
+        const node = maybe_node orelse return 0;
+        return 1 + countNodes(node.left) + countNodes(node.right);
+    }
+
+    fn collectKeysExcept(
+        maybe_node: ?*Node,
+        key: u64,
+        keys: *std.ArrayList(u64),
+        allocator: std.mem.Allocator,
+        removed: *bool,
+    ) !void {
+        const node = maybe_node orelse return;
+        try collectKeysExcept(node.left, key, keys, allocator, removed);
+        if (!removed.* and node.key == key) {
+            removed.* = true;
+        } else {
+            try keys.append(allocator, node.key);
+        }
+        try collectKeysExcept(node.right, key, keys, allocator, removed);
     }
 
     fn isRed(maybe_node: ?*Node) bool {
@@ -643,6 +862,70 @@ pub const RedBlackTree = struct {
         }
 
         return node;
+    }
+
+    fn serializeNode(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, maybe_node: ?*Node) !void {
+        if (maybe_node == null) {
+            try writeByte(bytes, allocator, 0);
+            return;
+        }
+
+        const node = maybe_node.?;
+        try writeByte(bytes, allocator, 1);
+        try writeU64(bytes, allocator, node.key);
+        try writeByte(bytes, allocator, if (node.color == .red) 1 else 0);
+        try serializeNode(bytes, allocator, node.left);
+        try serializeNode(bytes, allocator, node.right);
+    }
+
+    fn deserializeNode(allocator: std.mem.Allocator, bytes: []const u8, cursor: *usize) !?*Node {
+        const tag = try readByte(bytes, cursor);
+        switch (tag) {
+            0 => return null,
+            1 => {},
+            else => return TreeCodecError.InvalidFormat,
+        }
+
+        const node = try allocator.create(Node);
+        errdefer allocator.destroy(node);
+
+        const color_tag = blk: {
+            const key = try readU64(bytes, cursor);
+            const raw_color = try readByte(bytes, cursor);
+            const color = switch (raw_color) {
+                0 => Color.black,
+                1 => Color.red,
+                else => return TreeCodecError.InvalidFormat,
+            };
+            node.* = .{ .key = key, .color = color };
+            break :blk color;
+        };
+        _ = color_tag;
+
+        node.left = try deserializeNode(allocator, bytes, cursor);
+        errdefer destroyNode(allocator, node.left);
+
+        node.right = try deserializeNode(allocator, bytes, cursor);
+        errdefer destroyNode(allocator, node.right);
+
+        return node;
+    }
+
+    fn writeNodeIndented(writer: anytype, maybe_node: ?*Node, depth: usize, label: []const u8) !void {
+        for (0..depth) |_| try writer.writeAll("  ");
+        if (maybe_node == null) {
+            try writer.print("{s}: null\n", .{label});
+            return;
+        }
+
+        const node = maybe_node.?;
+        try writer.print("{s}: key={} color={s}\n", .{
+            label,
+            node.key,
+            if (node.color == .red) "red" else "black",
+        });
+        try writeNodeIndented(writer, node.left, depth + 1, "L");
+        try writeNodeIndented(writer, node.right, depth + 1, "R");
     }
 };
 
@@ -719,6 +1002,60 @@ pub const TwoThreeFourTree = struct {
         }
     }
 
+    pub fn remove(self: *TwoThreeFourTree, key: u64) !bool {
+        var keys: std.ArrayList(u64) = .empty;
+        defer keys.deinit(self.allocator);
+
+        var removed = false;
+        try collectKeysExcept(self.root, key, &keys, self.allocator, &removed);
+        if (!removed) return false;
+
+        var rebuilt = TwoThreeFourTree.init(self.allocator);
+        errdefer rebuilt.deinit();
+        for (keys.items) |existing_key| {
+            _ = try rebuilt.insert(existing_key);
+        }
+
+        destroyNode(self.allocator, self.root);
+        self.* = rebuilt;
+        return true;
+    }
+
+    pub fn writeIndented(self: *const TwoThreeFourTree, writer: anytype) !void {
+        if (self.root == null) {
+            try writer.writeAll("(empty)\n");
+            return;
+        }
+        try writeNodeIndented(writer, self.root, 0, "root");
+    }
+
+    pub fn serialize(self: *const TwoThreeFourTree, allocator: std.mem.Allocator) ![]u8 {
+        var bytes: std.ArrayList(u8) = .empty;
+        defer bytes.deinit(allocator);
+
+        try bytes.appendSlice(allocator, "2341");
+        try serializeNode(&bytes, allocator, self.root);
+        return bytes.toOwnedSlice(allocator);
+    }
+
+    pub fn deserialize(allocator: std.mem.Allocator, bytes: []const u8) !TwoThreeFourTree {
+        if (bytes.len < 4 or !std.mem.eql(u8, bytes[0..4], "2341")) {
+            return TreeCodecError.InvalidFormat;
+        }
+
+        var cursor: usize = 4;
+        const root = try deserializeNode(allocator, bytes, &cursor);
+        errdefer destroyNode(allocator, root);
+
+        if (cursor != bytes.len) return TreeCodecError.InvalidFormat;
+
+        return .{
+            .allocator = allocator,
+            .root = root,
+            .len = countKeys(root),
+        };
+    }
+
     fn createNode(allocator: std.mem.Allocator, is_leaf: bool) !*Node {
         const node = try allocator.create(Node);
         node.* = .{ .is_leaf = is_leaf };
@@ -734,6 +1071,47 @@ pub const TwoThreeFourTree = struct {
             }
             allocator.destroy(node);
         }
+    }
+
+    fn countKeys(maybe_node: ?*Node) usize {
+        const node = maybe_node orelse return 0;
+        var total: usize = node.key_count;
+        if (!node.is_leaf) {
+            for (0..node.key_count + 1) |child_index| {
+                total += countKeys(node.children[child_index]);
+            }
+        }
+        return total;
+    }
+
+    fn collectKeysExcept(
+        maybe_node: ?*Node,
+        key: u64,
+        keys: *std.ArrayList(u64),
+        allocator: std.mem.Allocator,
+        removed: *bool,
+    ) !void {
+        const node = maybe_node orelse return;
+        if (node.is_leaf) {
+            for (0..node.key_count) |index| {
+                if (!removed.* and node.keys[index] == key) {
+                    removed.* = true;
+                } else {
+                    try keys.append(allocator, node.keys[index]);
+                }
+            }
+            return;
+        }
+
+        for (0..node.key_count) |index| {
+            try collectKeysExcept(node.children[index], key, keys, allocator, removed);
+            if (!removed.* and node.keys[index] == key) {
+                removed.* = true;
+            } else {
+                try keys.append(allocator, node.keys[index]);
+            }
+        }
+        try collectKeysExcept(node.children[node.key_count], key, keys, allocator, removed);
     }
 
     fn insertKeyIntoNode(node: *Node, index: usize, key: u64) void {
@@ -776,6 +1154,94 @@ pub const TwoThreeFourTree = struct {
         }
         parent.keys[child_index] = promoted_key;
         parent.key_count += 1;
+    }
+
+    fn serializeNode(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, maybe_node: ?*Node) !void {
+        if (maybe_node == null) {
+            try writeByte(bytes, allocator, 0);
+            return;
+        }
+
+        const node = maybe_node.?;
+        try writeByte(bytes, allocator, 1);
+        try writeByte(bytes, allocator, node.key_count);
+        try writeByte(bytes, allocator, if (node.is_leaf) 1 else 0);
+        for (0..node.key_count) |index| {
+            try writeU64(bytes, allocator, node.keys[index]);
+        }
+        if (!node.is_leaf) {
+            for (0..node.key_count + 1) |index| {
+                try serializeNode(bytes, allocator, node.children[index]);
+            }
+        }
+    }
+
+    fn deserializeNode(allocator: std.mem.Allocator, bytes: []const u8, cursor: *usize) !?*Node {
+        const tag = try readByte(bytes, cursor);
+        switch (tag) {
+            0 => return null,
+            1 => {},
+            else => return TreeCodecError.InvalidFormat,
+        }
+
+        const key_count = try readByte(bytes, cursor);
+        if (key_count == 0 or key_count > 3) return TreeCodecError.InvalidFormat;
+
+        const is_leaf = switch (try readByte(bytes, cursor)) {
+            0 => false,
+            1 => true,
+            else => return TreeCodecError.InvalidFormat,
+        };
+
+        const node = try allocator.create(Node);
+        errdefer allocator.destroy(node);
+        node.* = .{ .key_count = key_count, .is_leaf = is_leaf };
+
+        for (0..key_count) |index| {
+            node.keys[index] = try readU64(bytes, cursor);
+            if (index > 0 and node.keys[index - 1] >= node.keys[index]) {
+                return TreeCodecError.InvalidFormat;
+            }
+        }
+
+        if (!is_leaf) {
+            for (0..key_count + 1) |index| {
+                node.children[index] = try deserializeNode(allocator, bytes, cursor);
+                errdefer {
+                    var cleanup_index: usize = 0;
+                    while (cleanup_index <= index) : (cleanup_index += 1) {
+                        destroyNode(allocator, node.children[cleanup_index]);
+                    }
+                }
+                if (node.children[index] == null) return TreeCodecError.InvalidFormat;
+            }
+        }
+
+        return node;
+    }
+
+    fn writeNodeIndented(writer: anytype, maybe_node: ?*Node, depth: usize, label: []const u8) !void {
+        for (0..depth) |_| try writer.writeAll("  ");
+        if (maybe_node == null) {
+            try writer.print("{s}: null\n", .{label});
+            return;
+        }
+
+        const node = maybe_node.?;
+        try writer.print("{s}: keys=[", .{label});
+        for (0..node.key_count) |index| {
+            if (index != 0) try writer.writeAll(", ");
+            try writer.print("{}", .{node.keys[index]});
+        }
+        try writer.print("] leaf={}\n", .{node.is_leaf});
+
+        if (!node.is_leaf) {
+            for (0..node.key_count + 1) |index| {
+                var child_label_buf: [8]u8 = undefined;
+                const child_label = try std.fmt.bufPrint(&child_label_buf, "C{}", .{index});
+                try writeNodeIndented(writer, node.children[index], depth + 1, child_label);
+            }
+        }
     }
 };
 
@@ -989,6 +1455,93 @@ test "rabin-karp finds overlapping matches" {
     defer std.testing.allocator.free(matches);
 
     try std.testing.expectEqualSlices(usize, &.{ 0, 1, 2, 3 }, matches);
+}
+
+test "AVL tree serialization round-trips" {
+    var tree = AvlTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const values = [_]u64{ 50, 20, 70, 10, 30, 60, 80, 25, 27, 26 };
+    for (values) |value| _ = try tree.insert(value);
+
+    const encoded = try tree.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+
+    var decoded = try AvlTree.deserialize(std.testing.allocator, encoded);
+    defer decoded.deinit();
+
+    const reencoded = try decoded.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(reencoded);
+
+    try std.testing.expectEqual(tree.len, decoded.len);
+    try std.testing.expectEqualSlices(u8, encoded, reencoded);
+    _ = try expectAvlInvariant(decoded.root, null, null);
+}
+
+test "red-black tree serialization round-trips" {
+    var tree = RedBlackTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const values = [_]u64{ 40, 10, 70, 5, 20, 60, 90, 15, 30, 25, 65 };
+    for (values) |value| _ = try tree.insert(value);
+
+    const encoded = try tree.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+
+    var decoded = try RedBlackTree.deserialize(std.testing.allocator, encoded);
+    defer decoded.deinit();
+
+    const reencoded = try decoded.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(reencoded);
+
+    try std.testing.expectEqual(tree.len, decoded.len);
+    try std.testing.expectEqualSlices(u8, encoded, reencoded);
+    _ = try expectRedBlackInvariant(decoded.root, null, null);
+}
+
+test "2-3-4 tree serialization round-trips" {
+    var tree = TwoThreeFourTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const values = [_]u64{ 40, 10, 70, 5, 20, 60, 90, 15, 30, 25, 65, 80, 95, 85 };
+    for (values) |value| _ = try tree.insert(value);
+
+    const encoded = try tree.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(encoded);
+
+    var decoded = try TwoThreeFourTree.deserialize(std.testing.allocator, encoded);
+    defer decoded.deinit();
+
+    const reencoded = try decoded.serialize(std.testing.allocator);
+    defer std.testing.allocator.free(reencoded);
+
+    try std.testing.expectEqual(tree.len, decoded.len);
+    try std.testing.expectEqualSlices(u8, encoded, reencoded);
+    _ = try expectTwoThreeFourInvariant(decoded.root, null, null);
+}
+
+fn writeByte(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u8) !void {
+    try bytes.append(allocator, value);
+}
+
+fn writeU64(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u64) !void {
+    var buf: [8]u8 = undefined;
+    std.mem.writeInt(u64, &buf, value, .little);
+    try bytes.appendSlice(allocator, &buf);
+}
+
+fn readByte(bytes: []const u8, cursor: *usize) TreeCodecError!u8 {
+    if (cursor.* >= bytes.len) return TreeCodecError.UnexpectedEof;
+    const value = bytes[cursor.*];
+    cursor.* += 1;
+    return value;
+}
+
+fn readU64(bytes: []const u8, cursor: *usize) TreeCodecError!u64 {
+    if (bytes.len - cursor.* < 8) return TreeCodecError.UnexpectedEof;
+    const slice = bytes[cursor.* .. cursor.* + 8];
+    cursor.* += 8;
+    return std.mem.readInt(u64, slice[0..8], .little);
 }
 
 fn expectAvlInvariant(maybe_node: ?*AvlTree.Node, min: ?u64, max: ?u64) !i32 {
