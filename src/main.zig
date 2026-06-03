@@ -99,7 +99,7 @@ pub fn main(init: std.process.Init) !void {
     defer output.flush() catch {};
 
     if (args.len > 1) {
-        try handleArgs(gpa, io, output, args[1..]);
+        try handleArgs(gpa, io, input, output, args[1..]);
         try output.flush();
         return;
     }
@@ -111,6 +111,7 @@ pub fn main(init: std.process.Init) !void {
 fn handleArgs(
     allocator: std.mem.Allocator,
     io: std.Io,
+    input: *std.Io.Reader,
     output: *std.Io.Writer,
     args: []const [:0]const u8,
 ) !void {
@@ -125,7 +126,13 @@ fn handleArgs(
     }
 
     if (std.mem.eql(u8, args[0], "tree")) {
-        try output.writeAll("Interactive tree mode is available without arguments.\n");
+        if (args.len > 1) {
+            const tail = try std.mem.join(allocator, " ", args[1..]);
+            defer allocator.free(tail);
+            try handleTreeCommand(allocator, io, input, output, tail);
+        } else {
+            try handleTreeCommand(allocator, io, input, output, "");
+        }
         return;
     }
 
