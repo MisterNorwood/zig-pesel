@@ -31,7 +31,7 @@ From the main prompt:
 
 - `help`
 - `generate [count file]`
-- `tree [new <avl|rb|234> | load <file>]`
+- `tree [new <avl|rb|234> [keys-file] | load <file>]`
 - `quit`
 
 If you run `generate` without arguments, the program asks for the count and output file.
@@ -44,6 +44,7 @@ Create a new tree:
 tree new avl
 tree new rb
 tree new 234
+tree new avl keys.txt
 ```
 
 Load a saved tree:
@@ -52,12 +53,21 @@ Load a saved tree:
 tree load mytree.bin
 ```
 
+Import newline-separated keys into the current tree:
+
+```text
+import keys.txt
+```
+
+`keys.txt` should contain one unsigned integer per line. Both Unix (`\n`) and Windows (`\r\n`) line endings are supported.
+
 Tree session commands:
 
 - `help`
 - `insert <key>`
 - `remove <key>`
 - `contains <key>`
+- `import <file>`
 - `print`
 - `explore`
 - `stats`
@@ -70,3 +80,4 @@ Tree session commands:
 
 - PESEL generation only writes the file if the target file does not already exist.
 - Tree save/load keeps the tree type and structure in a binary format.
+- `tree load <file>` loads the binary tree save format. Text key files should be imported with `tree new <type> <file>` or `import <file>`.

@@ -1228,20 +1228,35 @@ pub const TwoThreeFourTree = struct {
         }
 
         const node = maybe_node.?;
-        try writer.print("{s}: keys=[", .{label});
+        try writer.print("{s}: [", .{label});
         for (0..node.key_count) |index| {
-            if (index != 0) try writer.writeAll(", ");
+            if (index != 0) try writer.writeAll(" | ");
             try writer.print("{}", .{node.keys[index]});
         }
-        try writer.print("] leaf={}\n", .{node.is_leaf});
+        try writer.print("] ({s})\n", .{if (node.is_leaf) "leaf" else "internal"});
 
         if (!node.is_leaf) {
             for (0..node.key_count + 1) |index| {
-                var child_label_buf: [8]u8 = undefined;
-                const child_label = try std.fmt.bufPrint(&child_label_buf, "C{}", .{index});
+                var child_label_buf: [64]u8 = undefined;
+                const child_label = try childRangeLabel(&child_label_buf, node, index);
                 try writeNodeIndented(writer, node.children[index], depth + 1, child_label);
             }
         }
+    }
+
+    fn childRangeLabel(buf: []u8, node: *const Node, child_index: usize) ![]const u8 {
+        std.debug.assert(child_index <= node.key_count);
+
+        if (child_index == 0) {
+            return std.fmt.bufPrint(buf, "< {}", .{node.keys[0]});
+        }
+        if (child_index == node.key_count) {
+            return std.fmt.bufPrint(buf, "> {}", .{node.keys[node.key_count - 1]});
+        }
+        return std.fmt.bufPrint(buf, "{} .. {}", .{
+            node.keys[child_index - 1],
+            node.keys[child_index],
+        });
     }
 };
 
@@ -1518,6 +1533,26 @@ test "2-3-4 tree serialization round-trips" {
     try std.testing.expectEqual(tree.len, decoded.len);
     try std.testing.expectEqualSlices(u8, encoded, reencoded);
     _ = try expectTwoThreeFourInvariant(decoded.root, null, null);
+}
+
+test "2-3-4 tree pretty printer labels child ranges" {
+    var tree = TwoThreeFourTree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const values = [_]u64{ 40, 10, 70, 5, 20, 60, 90, 15, 30, 25, 65, 80, 95, 85 };
+    for (values) |value| _ = try tree.insert(value);
+
+    var output: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer output.deinit();
+
+    try tree.writeIndented(&output.writer);
+
+    try std.testing.expect(std.mem.indexOf(u8, output.writer.buffered(), "root: [") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.writer.buffered(), "(internal)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.writer.buffered(), "< ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.writer.buffered(), " .. ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.writer.buffered(), "> ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, output.writer.buffered(), " | ") != null);
 }
 
 fn writeByte(bytes: *std.ArrayList(u8), allocator: std.mem.Allocator, value: u8) !void {

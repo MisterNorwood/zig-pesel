@@ -3,6 +3,12 @@ const root = @import("root.zig");
 
 const tree_file_limit = 64 * 1024 * 1024;
 
+const KeyImportSummary = struct {
+    inserted: usize = 0,
+    duplicates: usize = 0,
+    blank_lines: usize = 0,
+};
+
 const TreeSession = union(enum) {
     avl: root.AvlTree,
     red_black: root.RedBlackTree,
@@ -237,7 +243,7 @@ fn handleTreeCommand(
     if (tail.len == 0) {
         try output.writeAll(
             \\Tree commands:
-            \\  tree new <avl|rb|234>
+            \\  tree new <avl|rb|234> [keys-file]
             \\  tree load <file>
             \\If no arguments are given, you will be prompted interactively.
             \\
@@ -255,6 +261,13 @@ fn handleTreeCommand(
             };
             var session = TreeSession.init(kind, allocator);
             defer session.deinit();
+            try output.writeAll("Key file to import [empty to skip]: ");
+            try output.flush();
+            const path_line = (try readLine(input)) orelse return;
+            if (path_line.len != 0) {
+                const imported = try importKeysIntoSessionOrReport(&session, allocator, io, output, path_line);
+                if (!imported) return;
+            }
             try runTreeSession(&session, allocator, io, input, output);
             return;
         }
@@ -273,16 +286,21 @@ fn handleTreeCommand(
 
     const command = splitFirstToken(tail);
     if (std.mem.eql(u8, command.head, "new")) {
-        if (command.tail.len == 0) {
-            try output.writeAll("Usage: tree new <avl|rb|234>\n");
+        const new_args = splitFirstToken(command.tail);
+        if (new_args.head.len == 0) {
+            try output.writeAll("Usage: tree new <avl|rb|234> [keys-file]\n");
             return;
         }
-        const kind = parseTreeKind(command.tail) orelse {
+        const kind = parseTreeKind(new_args.head) orelse {
             try output.writeAll("Unknown tree type.\n");
             return;
         };
         var session = TreeSession.init(kind, allocator);
         defer session.deinit();
+        if (new_args.tail.len != 0) {
+            const imported = try importKeysIntoSessionOrReport(&session, allocator, io, output, new_args.tail);
+            if (!imported) return;
+        }
         try runTreeSession(&session, allocator, io, input, output);
         return;
     }
@@ -356,6 +374,17 @@ fn runTreeSession(
             try output.print("type={s} nodes={}\n", .{ session.kindName(), session.len() });
             continue;
         }
+        if (std.mem.eql(u8, split.head, "import")) {
+            if (split.tail.len == 0) {
+                try output.writeAll("Usage: import <file>\n");
+                continue;
+            }
+            const imported = try importKeysIntoSessionOrReport(session, allocator, io, output, split.tail);
+            if (imported) {
+                try output.print("Tree now contains {} keys.\n", .{session.len()});
+            }
+            continue;
+        }
         if (std.mem.eql(u8, split.head, "print") or std.mem.eql(u8, split.head, "explore")) {
             try session.writeIndented(output);
             continue;
@@ -405,12 +434,93 @@ fn loadTreeSession(allocator: std.mem.Allocator, io: std.Io, path: []const u8) !
     };
 }
 
+fn importKeysIntoSessionOrReport(
+    session: *TreeSession,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    output: *std.Io.Writer,
+    path: []const u8,
+) !bool {
+    var invalid_line: ?usize = null;
+    const summary = importKeysFromFile(session, allocator, io, path, &invalid_line) catch |err| switch (err) {
+        error.InvalidKeyLine => {
+            if (invalid_line) |line_no| {
+                try output.print(
+                    "Invalid key at line {} in '{s}'. Expected one unsigned integer per line.\n",
+                    .{ line_no, path },
+                );
+            } else {
+                try output.print("Invalid key file '{s}'.\n", .{path});
+            }
+            return false;
+        },
+        else => return err,
+    };
+
+    try output.print(
+        "Imported {} keys from '{s}' (duplicates skipped: {}, blank lines ignored: {}).\n",
+        .{ summary.inserted, path, summary.duplicates, summary.blank_lines },
+    );
+    return true;
+}
+
+fn importKeysFromFile(
+    session: *TreeSession,
+    allocator: std.mem.Allocator,
+    io: std.Io,
+    path: []const u8,
+    invalid_line: *?usize,
+) !KeyImportSummary {
+    const data = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(tree_file_limit));
+    defer allocator.free(data);
+
+    return importKeysFromText(session, allocator, data, invalid_line);
+}
+
+fn importKeysFromText(
+    session: *TreeSession,
+    allocator: std.mem.Allocator,
+    data: []const u8,
+    invalid_line: *?usize,
+) !KeyImportSummary {
+    var keys: std.ArrayList(u64) = .empty;
+    defer keys.deinit(allocator);
+
+    invalid_line.* = null;
+    var summary: KeyImportSummary = .{};
+    var line_no: usize = 0;
+    var lines = std.mem.splitScalar(u8, data, '\n');
+    while (lines.next()) |raw_line| {
+        line_no += 1;
+        const line = std.mem.trim(u8, raw_line, " \t\r");
+        if (line.len == 0) {
+            summary.blank_lines += 1;
+            continue;
+        }
+
+        const key = parseU64(line) catch {
+            invalid_line.* = line_no;
+            return error.InvalidKeyLine;
+        };
+        try keys.append(allocator, key);
+    }
+
+    for (keys.items) |key| {
+        if (try session.insert(key)) {
+            summary.inserted += 1;
+        } else {
+            summary.duplicates += 1;
+        }
+    }
+    return summary;
+}
+
 fn writeMainHelp(output: *std.Io.Writer) !void {
     try output.writeAll(
         \\Commands:
         \\  help
         \\  generate [count file]
-        \\  tree [new <avl|rb|234> | load <file>]
+        \\  tree [new <avl|rb|234> [keys-file] | load <file>]
         \\  quit
         \\
     );
@@ -423,6 +533,7 @@ fn writeTreeHelp(output: *std.Io.Writer) !void {
         \\  insert <key>
         \\  remove <key>
         \\  contains <key>
+        \\  import <file>
         \\  print
         \\  explore
         \\  stats
@@ -486,4 +597,40 @@ fn parseRequiredU64(output: *std.Io.Writer, raw: []const u8, usage: []const u8) 
         return null;
     }
     return try parseU64(raw);
+}
+
+test "importKeysFromText imports LF and CRLF separated keys" {
+    var session = TreeSession.init(.avl, std.testing.allocator);
+    defer session.deinit();
+
+    var invalid_line: ?usize = null;
+    const summary = try importKeysFromText(&session, std.testing.allocator, "10\r\n20\n20\n\n30\r\n", &invalid_line);
+
+    try std.testing.expectEqual(@as(?usize, null), invalid_line);
+    try std.testing.expectEqual(@as(usize, 3), summary.inserted);
+    try std.testing.expectEqual(@as(usize, 1), summary.duplicates);
+    try std.testing.expectEqual(@as(usize, 2), summary.blank_lines);
+    try std.testing.expect(session.contains(10));
+    try std.testing.expect(session.contains(20));
+    try std.testing.expect(session.contains(30));
+    try std.testing.expectEqual(@as(usize, 3), session.len());
+}
+
+test "importKeysFromText rejects invalid lines without mutating the tree" {
+    var session = TreeSession.init(.red_black, std.testing.allocator);
+    defer session.deinit();
+
+    try std.testing.expect(try session.insert(7));
+
+    var invalid_line: ?usize = null;
+    try std.testing.expectError(
+        error.InvalidKeyLine,
+        importKeysFromText(&session, std.testing.allocator, "10\nabc\n30\n", &invalid_line),
+    );
+
+    try std.testing.expectEqual(@as(?usize, 2), invalid_line);
+    try std.testing.expectEqual(@as(usize, 1), session.len());
+    try std.testing.expect(session.contains(7));
+    try std.testing.expect(!session.contains(10));
+    try std.testing.expect(!session.contains(30));
 }
